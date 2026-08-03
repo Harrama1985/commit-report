@@ -1,0 +1,6 @@
+node_modules/
+*.log
+work-report-*.html
+preview.html
+.DS_Store
+.env
