@@ -24,6 +24,16 @@ const prettyProjectName = (name) =>
 
 const branchLabel = (branches) => (branches.length ? branches.join(', ') : '—');
 
+/** The estimate is a half-hour figure, so it prints as hours and halves. */
+function formatEstimate(minutes) {
+  if (!minutes) return null;
+
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  if (hours === 0) return `\u2248 ${rest}min`;
+  return rest ? `\u2248 ${hours}h${rest}` : `\u2248 ${hours}h`;
+}
+
 function renderBranchTags(branches) {
   if (!branches?.length) return '';
   const tags = branches
@@ -79,6 +89,11 @@ function renderDay(day) {
 
   const title = day.ai?.title ? escapeHtml(day.ai.title) : 'Work carried out';
 
+  const estimate = formatEstimate(day.ai?.estimatedMinutes);
+  const dateLine = estimate
+    ? `${escapeHtml(formatDate(day.date))} <span class="est">${estimate}</span>`
+    : escapeHtml(formatDate(day.date));
+
   const summary = day.ai?.summary
     ? `<div class="summary-row">
             <p class="summary">${escapeHtml(day.ai.summary)}</p>
@@ -94,7 +109,7 @@ function renderDay(day) {
         <article class="day">
           <header class="day-head">
             <div>
-              <p class="day-date">${escapeHtml(formatDate(day.date))}</p>
+              <p class="day-date">${dateLine}</p>
               <h3>${title}</h3>
             </div>
             <p class="day-meta">${day.commits.length} ${day.commits.length === 1 ? 'change' : 'changes'} &middot; ${stats.files} ${stats.files === 1 ? 'file' : 'files'}</p>
@@ -122,13 +137,16 @@ function renderProject(project) {
       </section>`;
 }
 
-function renderStats(totals) {
+function renderStats(totals, estimatedMinutes) {
   const cards = [
     ['Projects', totals.projects],
     ['Working days', totals.days],
     ['Changes delivered', totals.commits],
     ['Files touched', totals.files],
   ];
+
+  const estimate = formatEstimate(estimatedMinutes);
+  if (estimate) cards.push(['Estimated hours', estimate]);
 
   return cards
     .map(
@@ -231,6 +249,17 @@ const STYLES = `
     }
     .day-head { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; flex-wrap: wrap; }
     .day-date { margin: 0 0 2px; font-size: 13px; color: var(--ink-soft); }
+    .est {
+      display: inline-block;
+      margin-left: 6px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      border-radius: 999px;
+      padding: 1px 8px;
+      font-size: 12px;
+      font-weight: 600;
+      white-space: nowrap;
+    }
     .day-head h3 { margin: 0; font-size: 18px; letter-spacing: -0.01em; }
     .day-meta { margin: 0; font-size: 13px; color: var(--ink-soft); white-space: nowrap; }
     .summary { margin: 14px 0 0; }
@@ -359,6 +388,13 @@ export function renderReport({ projects, totals, meta }) {
     .filter(Boolean)
     .join(' &middot; ');
 
+  // Summed here and not in `summarizeTotals`, which runs before the AI pass.
+  const estimatedMinutes = projects.reduce(
+    (total, project) =>
+      total + project.days.reduce((sum, day) => sum + (day.ai?.estimatedMinutes ?? 0), 0),
+    0,
+  );
+
   const body = projects.length
     ? projects.map(renderProject).join('')
     : `<div class="empty"><p>No work was recorded for this period.</p></div>`;
@@ -380,7 +416,7 @@ export function renderReport({ projects, totals, meta }) {
       <p class="byline">${byline}</p>
     </header>
 
-    <div class="stats">${renderStats(totals)}</div>
+    <div class="stats">${renderStats(totals, estimatedMinutes)}</div>
 
     ${body}
 

@@ -357,3 +357,55 @@ test('the rendered report contains the summary and escapes hostile text', async 
   assert.ok(!html.includes('<script>alert(1)</script>'));
   assert.match(html, /&lt;script&gt;/);
 });
+
+test('the rendered report shows the day estimate and the total', async () => {
+  const api = await startMock((entry, res) => {
+    jsonReply(
+      res,
+      200,
+      candidate(
+        JSON.stringify({
+          title: 'Basket work',
+          summary: 'Customers can now enter a discount code.',
+          estimatedMinutes: 150,
+        }),
+      ),
+    );
+  });
+
+  const projects = sampleProjects();
+  await describeDays(projects, { apiKey: 'k', baseUrl: api.baseUrl });
+
+  const html = renderReport({
+    projects,
+    totals: summarizeTotals(projects),
+    meta: {
+      from: '2026-08-03',
+      to: '2026-08-03',
+      author: 'dev@example.com',
+      model: 'gemini-3.6-flash',
+      generatedAt: new Date('2026-08-03T12:00:00Z'),
+    },
+  });
+
+  assert.match(html, /<span class="est">\u2248 2h30<\/span>/);
+  assert.match(html, /Estimated hours/);
+  assert.match(html, /<span class="stat-value">\u2248 2h30<\/span>/);
+});
+
+test('a report without estimates carries no estimate markup', () => {
+  const html = renderReport({
+    projects: sampleProjects(),
+    totals: summarizeTotals(sampleProjects()),
+    meta: {
+      from: '2026-08-03',
+      to: '2026-08-03',
+      author: 'dev@example.com',
+      model: null,
+      generatedAt: new Date('2026-08-03T12:00:00Z'),
+    },
+  });
+
+  assert.ok(!html.includes('<span class="est">'), 'no day should carry a badge');
+  assert.ok(!html.includes('Estimated hours'), 'the header card should be left out');
+});
