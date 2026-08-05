@@ -37,7 +37,8 @@ Prompt rules for the number:
 
 Normalisation in `ai.js`, before the value is stored:
 
-- Accept a finite number or a numeric string; anything else stores `null`.
+- Accept a finite positive number or a numeric string; anything else, including
+  zero and negatives, stores `null`.
 - Clamp to `[30, 2400]` minutes, then round to the nearest 30 minutes.
 - Stored as `day.ai.estimatedMinutes`.
 
@@ -50,9 +51,9 @@ so it carries no estimate. That behaviour already exists and does not change.
 
 - `formatEstimate(minutes)` returns `≈ 30min` under an hour, `≈ 5h` on a whole
   hour, and `≈ 2h30` otherwise.
-- The day header prints the estimate right after the date:
-  `Monday, 3 August 2026 · ≈ 5h`, the estimate wrapped in `<span class="est">`
-  and styled as a small accent pill.
+- The day header prints the estimate right after the date, wrapped in
+  `<span class="est">` and styled as a small accent pill:
+  `Monday, 3 August 2026  ≈ 5h`.
 - A day without an estimate prints the date alone.
 - The stats grid gains a fifth card, `Estimated hours`, holding the sum of every
   day that has an estimate. The card is left out when the sum is zero.
@@ -65,8 +66,9 @@ so it carries no estimate. That behaviour already exists and does not change.
 
 Added to `test/ai.test.js`, which already covers the AI pass and the rendering:
 
-- A day is stored with its estimate rounded to the nearest half hour.
-- A non-numeric or out-of-range estimate stores `null` and renders no badge.
+- A day is stored with its estimate rounded to the nearest half hour, and a
+  number outside the bounds is pulled back to 30 or 2400 minutes.
+- A non-numeric or non-positive estimate stores `null` and renders no badge.
 - The rendered HTML carries the day badge and the `Estimated hours` card.
 - A report whose days have no estimate carries neither badge nor card.
 
