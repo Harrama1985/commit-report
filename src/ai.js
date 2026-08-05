@@ -8,13 +8,19 @@ const MODEL_FALLBACKS = ['gemini-flash-latest', 'gemini-2.5-flash'];
 /** Roughly two printed lines at the report's text width. */
 const SUMMARY_LIMIT = 200;
 
+/** Half-hour steps: from half an hour of work up to a full week of it. */
+const MIN_ESTIMATE_MINUTES = 30;
+const MAX_ESTIMATE_MINUTES = 2400;
+const ESTIMATE_STEP_MINUTES = 30;
+
 const RESPONSE_SCHEMA = {
   type: 'OBJECT',
   properties: {
     title: { type: 'STRING', maxLength: '70' },
     summary: { type: 'STRING', maxLength: String(SUMMARY_LIMIT) },
+    estimatedMinutes: { type: 'INTEGER' },
   },
-  required: ['title', 'summary'],
+  required: ['title', 'summary', 'estimatedMinutes'],
 };
 
 const SYSTEM_PROMPT = `You are writing a daily work report that a software developer sends to a non-technical client.
@@ -34,8 +40,11 @@ Rules:
 Return JSON with:
 - "title": a short headline of the day for this project, maximum 8 words.
 - "summary": the complete description of the day, as one paragraph of at most 2 sentences and at most ${SUMMARY_LIMIT} characters in total. This is a hard limit: it must never be longer than two printed lines.
+- "estimatedMinutes": how much work this day represents, in minutes, as a whole number.
 
-The summary is the only text the client reads, so it must be complete and dense. Cover every distinct piece of work of the day, folding the smaller ones into a shared clause, and drop nothing that the client would care about. Write it as plain running prose: never use bullet points, dashes, numbering, line breaks or any other kind of list.`;
+The summary is the only text the client reads, so it must be complete and dense. Cover every distinct piece of work of the day, folding the smaller ones into a shared clause, and drop nothing that the client would care about. Write it as plain running prose: never use bullet points, dashes, numbering, line breaks or any other kind of list.
+
+Base the estimate on the work itself: what the changes do, how many files they touch, how much they add or remove. The times on the commits tell you nothing, they are when the work was saved and not how long it took. Assume a developer working with an AI assistant, so the pace is fast, and always include the testing, the review and the deployment in the number. Never cap the number at a working day: one batch of commits often carries work spread over several days.`;
 
 function buildUserPrompt({ projectName, date, commits }) {
   const lines = commits.map((commit, index) => {
@@ -101,6 +110,19 @@ function clampSentences(text, limit) {
   }
 
   return kept.trim() || clampWords(clean, limit);
+}
+
+/**
+ * Half-hour steps keep the printed estimate honest about how precise it is.
+ * Anything that is not a positive number is dropped, so the report shows no
+ * estimate rather than a wrong one.
+ */
+function normalizeEstimate(value) {
+  const minutes = typeof value === 'string' ? Number(value) : value;
+  if (typeof minutes !== 'number' || !Number.isFinite(minutes) || minutes <= 0) return null;
+
+  const bounded = Math.min(Math.max(minutes, MIN_ESTIMATE_MINUTES), MAX_ESTIMATE_MINUTES);
+  return Math.round(bounded / ESTIMATE_STEP_MINUTES) * ESTIMATE_STEP_MINUTES;
 }
 
 function parseJsonLoosely(text) {
@@ -274,6 +296,7 @@ export async function describeDays(projects, options) {
             typeof result.summary === 'string'
               ? clampSentences(toProse(result.summary), SUMMARY_LIMIT)
               : null,
+          estimatedMinutes: normalizeEstimate(result.estimatedMinutes),
           model: activeModel,
         };
         break;

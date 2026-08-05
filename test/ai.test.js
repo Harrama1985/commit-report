@@ -250,6 +250,72 @@ test('describeDays records the failure on the day instead of throwing', async ()
   assert.match(projects[0].days[0].error, /400/);
 });
 
+test('describeDays stores the estimate rounded to the nearest half hour', async () => {
+  const api = await startMock((entry, res) => {
+    jsonReply(
+      res,
+      200,
+      candidate(JSON.stringify({ title: 'T', summary: 'S', estimatedMinutes: 200 })),
+    );
+  });
+
+  const projects = sampleProjects();
+  await describeDays(projects, { apiKey: 'k', baseUrl: api.baseUrl });
+
+  assert.equal(projects[0].days[0].ai.estimatedMinutes, 210);
+});
+
+test('describeDays keeps the estimate inside its bounds', async () => {
+  const api = await startMock((entry, res, count) => {
+    const estimatedMinutes = count === 1 ? 4 : 99_999;
+    jsonReply(res, 200, candidate(JSON.stringify({ title: 'T', summary: 'S', estimatedMinutes })));
+  });
+
+  const small = sampleProjects();
+  await describeDays(small, { apiKey: 'k', baseUrl: api.baseUrl });
+  assert.equal(small[0].days[0].ai.estimatedMinutes, 30);
+
+  const huge = sampleProjects();
+  await describeDays(huge, { apiKey: 'k', baseUrl: api.baseUrl });
+  assert.equal(huge[0].days[0].ai.estimatedMinutes, 2400);
+});
+
+test('describeDays drops an estimate that is not a usable number', async () => {
+  const api = await startMock((entry, res, count) => {
+    const estimatedMinutes = count === 1 ? 'about a day' : -60;
+    jsonReply(res, 200, candidate(JSON.stringify({ title: 'T', summary: 'S', estimatedMinutes })));
+  });
+
+  const words = sampleProjects();
+  await describeDays(words, { apiKey: 'k', baseUrl: api.baseUrl });
+  assert.equal(words[0].days[0].ai.estimatedMinutes, null);
+  assert.equal(words[0].days[0].ai.summary, 'S', 'the description must survive a bad estimate');
+
+  const negative = sampleProjects();
+  await describeDays(negative, { apiKey: 'k', baseUrl: api.baseUrl });
+  assert.equal(negative[0].days[0].ai.estimatedMinutes, null);
+});
+
+test('describeDays asks the model for the estimate', async () => {
+  const api = await startMock((entry, res) => {
+    jsonReply(
+      res,
+      200,
+      candidate(JSON.stringify({ title: 'T', summary: 'S', estimatedMinutes: 60 })),
+    );
+  });
+
+  await describeDays(sampleProjects(), { apiKey: 'k', baseUrl: api.baseUrl });
+
+  const { responseSchema } = api.requests[0].body.generationConfig;
+  assert.equal(responseSchema.properties.estimatedMinutes.type, 'INTEGER');
+  assert.ok(responseSchema.required.includes('estimatedMinutes'));
+
+  const system = api.requests[0].body.systemInstruction.parts[0].text;
+  assert.match(system, /estimatedMinutes/);
+  assert.match(system, /deployment/i);
+});
+
 test('the rendered report contains the summary and escapes hostile text', async () => {
   const api = await startMock((entry, res) => {
     jsonReply(
