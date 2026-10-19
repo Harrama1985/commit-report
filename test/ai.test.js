@@ -29,7 +29,7 @@ const sampleProjects = () =>
     },
   ]);
 
-/** Spins up a stand-in for the Gemini endpoint and returns its base URL. */
+/** Spins up a stand-in for the OpenAI endpoint and returns its base URL. */
 async function mockApi(handler) {
   const requests = [];
   const server = createServer((req, res) => {
@@ -48,7 +48,7 @@ async function mockApi(handler) {
   const { port } = server.address();
 
   return {
-    baseUrl: `http://127.0.0.1:${port}/v1beta/models`,
+    baseUrl: `http://127.0.0.1:${port}/v1`,
     requests,
     close: () => new Promise((resolve) => server.close(resolve)),
   };
@@ -59,7 +59,7 @@ const jsonReply = (res, status, payload) => {
   res.end(JSON.stringify(payload));
 };
 
-const candidate = (text) => ({ candidates: [{ content: { parts: [{ text }] } }] });
+const candidate = (text) => ({ choices: [{ message: { content: text }, finish_reason: 'stop' }] });
 
 const servers = [];
 after(async () => {
@@ -89,20 +89,21 @@ test('describeDays sends the commits and stores the summary on the day', async (
   const projects = sampleProjects();
   const result = await describeDays(projects, {
     apiKey: 'test-key',
-    model: 'gemini-3.6-flash',
+    model: 'gpt-5.4-mini',
     baseUrl: api.baseUrl,
   });
 
   assert.equal(result.total, 1);
   assert.equal(api.requests.length, 1);
-  assert.equal(api.requests[0].headers['x-goog-api-key'], 'test-key');
-  assert.match(api.requests[0].url, /gemini-3\.6-flash:generateContent$/);
+  assert.equal(api.requests[0].headers.authorization, 'Bearer test-key');
+  assert.match(api.requests[0].url, /\/v1\/chat\/completions$/);
+  assert.equal(api.requests[0].body.model, 'gpt-5.4-mini');
 
-  const prompt = api.requests[0].body.contents[0].parts[0].text;
+  const prompt = api.requests[0].body.messages[1].content;
   assert.match(prompt, /shop-fe/);
   assert.match(prompt, /promo code field/);
   assert.match(prompt, /total rounding/);
-  assert.equal(api.requests[0].body.generationConfig.responseMimeType, 'application/json');
+  assert.equal(api.requests[0].body.response_format.type, 'json_schema');
 
   const day = projects[0].days[0];
   assert.equal(day.title, undefined);
@@ -230,11 +231,11 @@ test('describeDays falls back to another model on 404', async () => {
   const projects = sampleProjects();
   const result = await describeDays(projects, {
     apiKey: 'k',
-    model: 'gemini-does-not-exist',
+    model: 'gpt-does-not-exist',
     baseUrl: api.baseUrl,
   });
 
-  assert.equal(result.model, 'gemini-flash-latest');
+  assert.equal(result.model, 'gpt-5-mini');
   assert.equal(projects[0].days[0].ai.title, 'T');
 });
 
@@ -307,13 +308,32 @@ test('describeDays asks the model for the estimate', async () => {
 
   await describeDays(sampleProjects(), { apiKey: 'k', baseUrl: api.baseUrl });
 
-  const { responseSchema } = api.requests[0].body.generationConfig;
-  assert.equal(responseSchema.properties.estimatedMinutes.type, 'INTEGER');
-  assert.ok(responseSchema.required.includes('estimatedMinutes'));
+  const { schema } = api.requests[0].body.response_format.json_schema;
+  assert.equal(schema.properties.estimatedMinutes.type, 'integer');
+  assert.ok(schema.required.includes('estimatedMinutes'));
 
-  const system = api.requests[0].body.systemInstruction.parts[0].text;
+  const system = api.requests[0].body.messages[0].content;
   assert.match(system, /estimatedMinutes/);
   assert.match(system, /deployment/i);
+  assert.match(system, /reads that code and reworks/i);
+  assert.doesNotMatch(system, /pace is fast/);
+  assert.match(system, /ordinary client/i);
+  assert.match(system, /Do not describe them/i);
+});
+
+test('describeDays shows the model the lines that changed', async () => {
+  const api = await startMock((entry, res) => {
+    jsonReply(res, 200, candidate(JSON.stringify({ title: 'T', summary: 'S', estimatedMinutes: 60 })));
+  });
+
+  const projects = sampleProjects();
+  projects[0].days[0].commits[0].patch = 'diff --git a/src/cart.js b/src/cart.js\n+discount code field';
+
+  await describeDays(projects, { apiKey: 'k', baseUrl: api.baseUrl });
+
+  const prompt = api.requests[0].body.messages[1].content;
+  assert.match(prompt, /Changed lines:/);
+  assert.match(prompt, /discount code field/);
 });
 
 test('the rendered report contains the summary and escapes hostile text', async () => {
@@ -340,7 +360,7 @@ test('the rendered report contains the summary and escapes hostile text', async 
       from: '2026-08-03',
       to: '2026-08-03',
       author: 'dev@example.com',
-      model: 'gemini-3.6-flash',
+      model: 'gpt-5.4-mini',
       generatedAt: new Date('2026-08-03T12:00:00Z'),
     },
   });
@@ -356,6 +376,23 @@ test('the rendered report contains the summary and escapes hostile text', async 
   assert.match(html, /Shop FE/);
   assert.ok(!html.includes('<script>alert(1)</script>'));
   assert.match(html, /&lt;script&gt;/);
+});
+
+test('the technical detail names the author of each commit', () => {
+  const html = renderReport({
+    projects: sampleProjects(),
+    totals: summarizeTotals(sampleProjects()),
+    meta: {
+      from: '2026-08-03',
+      to: '2026-08-03',
+      author: 'dev@example.com',
+      model: null,
+      generatedAt: new Date('2026-08-03T12:00:00Z'),
+    },
+  });
+
+  assert.match(html, /<th>Author<\/th>/);
+  assert.match(html, /<td class="muted">Dev<\/td>/);
 });
 
 test('the rendered report shows the day estimate and the total', async () => {
@@ -383,7 +420,7 @@ test('the rendered report shows the day estimate and the total', async () => {
       from: '2026-08-03',
       to: '2026-08-03',
       author: 'dev@example.com',
-      model: 'gemini-3.6-flash',
+      model: 'gpt-5.4-mini',
       generatedAt: new Date('2026-08-03T12:00:00Z'),
     },
   });
@@ -391,6 +428,54 @@ test('the rendered report shows the day estimate and the total', async () => {
   assert.match(html, /<span class="est">\u2248 2h30<\/span>/);
   assert.match(html, /Estimated hours/);
   assert.match(html, /<span class="stat-value">\u2248 2h30<\/span>/);
+});
+
+test('the report groups by date, then by project inside each date', () => {
+  const projects = groupByProjectAndDate([
+    {
+      project: { name: 'shop-fe', path: '/shop-fe' },
+      commits: [
+        { ...commit('promo field'), isoDate: '2026-08-03T09:00:00+01:00' },
+        { ...commit('rounding fix'), isoDate: '2026-08-03T10:00:00+01:00' },
+        {
+          ...commit('early shop'),
+          date: '2026-08-01',
+          isoDate: '2026-08-01T10:00:00+01:00',
+        },
+      ],
+    },
+    {
+      project: { name: 'api-be', path: '/api-be' },
+      commits: [{ ...commit('api discount'), isoDate: '2026-08-03T11:00:00+01:00' }],
+    },
+  ]);
+
+  const html = renderReport({
+    projects,
+    totals: summarizeTotals(projects),
+    meta: {
+      from: '2026-08-01',
+      to: '2026-08-03',
+      author: 'dev@example.com',
+      model: null,
+      generatedAt: new Date('2026-08-03T12:00:00Z'),
+    },
+  });
+
+  const newer = html.indexOf('<h2>Monday, 3 August 2026</h2>');
+  const older = html.indexOf('<h2>Saturday, 1 August 2026</h2>');
+  const shop = html.indexOf('Shop FE');
+  const api = html.indexOf('Api BE');
+  const promo = html.indexOf('promo field');
+  const early = html.indexOf('early shop');
+
+  assert.ok(newer !== -1 && older !== -1, 'each day is a top-level heading');
+  assert.ok(
+    newer < shop && shop < api && api < older && older < early,
+    'newer days come first, and projects sit inside their day',
+  );
+  assert.ok(shop < promo && promo < api, 'a project’s commits stay with that project');
+  assert.ok(!html.includes('<h2>Shop FE</h2>'), 'projects are no longer the outer heading');
 });
 
 test('a report without estimates carries no estimate markup', () => {

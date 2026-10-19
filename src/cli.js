@@ -6,6 +6,7 @@ import { parseArgs } from 'node:util';
 
 import { DEFAULT_MODEL, buildReport } from './index.js';
 import { resolveRange } from './dates.js';
+import { loadEnv } from './env.js';
 import { getGitEmail } from './git.js';
 import { defaultScanDir, expandHome } from './paths.js';
 
@@ -60,7 +61,7 @@ ${bold('OPTIONS')}
   --author <email>       Filter by author (default: your git config user.email)
   --all                  Include commits from every author
   --merges               Include merge commits
-  --model <name>         Google AI model (default: ${DEFAULT_MODEL})
+  --model <name>         OpenAI model (default: ${DEFAULT_MODEL})
   --concurrency <n>      Parallel AI requests (default: 4)
   --no-ai                Skip the AI summaries and only list the raw activity
   --open                 Open the report when it is ready
@@ -69,8 +70,9 @@ ${bold('OPTIONS')}
   -v, --version          Show the version
 
 ${bold('ENVIRONMENT')}
-  ${cyan('GEMINI_API_KEY')}         Google AI Studio key, required for the summaries
-                         Get one at https://aistudio.google.com/apikey
+  ${cyan('OPENAI_API_KEY')}         OpenAI key, required for the summaries
+                         Get one at https://platform.openai.com/api-keys
+                         Also read from a ${cyan('.env')} in the current folder
 
 ${bold('EXAMPLES')}
   commit-report
@@ -133,6 +135,8 @@ function openFile(target, log) {
 }
 
 async function main() {
+  loadEnv();
+
   const { values, positionals } = parseArgs({
     options: OPTIONS,
     allowPositionals: true,
@@ -162,7 +166,7 @@ async function main() {
 
   const dir = values.dir ? expandHome(values.dir) : await defaultScanDir();
   const author = values.all ? null : (values.author ?? (await getGitEmail()));
-  const apiKey = values['no-ai'] ? null : (process.env.GEMINI_API_KEY?.trim() || null);
+  const apiKey = values['no-ai'] ? null : (process.env.OPENAI_API_KEY?.trim() || null);
   const quiet = values.quiet;
   const log = (text) => {
     if (!quiet) process.stdout.write(`${text}\n`);
@@ -176,7 +180,7 @@ async function main() {
 
   if (!values['no-ai'] && !apiKey) {
     log(
-      `${yellow('!')} GEMINI_API_KEY is not set, so the report will list the raw activity without plain-language summaries.\n  ${dim('Get a key at https://aistudio.google.com/apikey then run: export GEMINI_API_KEY=...')}\n  ${dim('Use --no-ai to hide this warning.')}`,
+      `${yellow('!')} OPENAI_API_KEY is not set, so the report will list the raw activity without plain-language summaries.\n  ${dim('Run: export OPENAI_API_KEY=... or put it in a .env in this folder.')}\n  ${dim('A key you just added to ~/.zshrc only reaches a terminal opened after that.')}\n  ${dim('Use --no-ai to hide this warning.')}`,
     );
   }
 

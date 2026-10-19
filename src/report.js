@@ -50,6 +50,7 @@ function renderCommitTable(commits, branches = []) {
                 <td class="mono muted">${escapeHtml(commit.time)}</td>
                 <td class="mono muted">${escapeHtml(commit.shortHash)}</td>
                 <td class="mono muted">${escapeHtml(branchLabel(commit.branches ?? []))}</td>
+                <td class="muted">${escapeHtml(commit.authorName?.trim() || '—')}</td>
                 <td>${escapeHtml(commit.subject)}</td>
                 <td class="numeric"><span class="add">+${commit.insertions}</span> <span class="del">-${commit.deletions}</span></td>
                 <td class="numeric muted">${commit.files.length}</td>
@@ -69,7 +70,7 @@ function renderCommitTable(commits, branches = []) {
             <summary>${heading}</summary>
             <table>
               <thead>
-                <tr><th>Time</th><th>Ref</th><th>Branch</th><th>Change</th><th class="numeric">Lines</th><th class="numeric">Files</th></tr>
+                <tr><th>Time</th><th>Ref</th><th>Branch</th><th>Author</th><th>Change</th><th class="numeric">Lines</th><th class="numeric">Files</th></tr>
               </thead>
               <tbody>${rows}
               </tbody>
@@ -77,7 +78,7 @@ function renderCommitTable(commits, branches = []) {
           </details>`;
 }
 
-function renderDay(day) {
+function renderProjectDay(project, day) {
   const stats = day.commits.reduce(
     (acc, commit) => ({
       insertions: acc.insertions + commit.insertions,
@@ -87,12 +88,19 @@ function renderDay(day) {
     { insertions: 0, deletions: 0, files: 0 },
   );
 
-  const title = day.ai?.title ? escapeHtml(day.ai.title) : 'Work carried out';
-
   const estimate = formatEstimate(day.ai?.estimatedMinutes);
-  const dateLine = estimate
-    ? `${escapeHtml(formatDate(day.date))} <span class="est">${estimate}</span>`
-    : escapeHtml(formatDate(day.date));
+  const name = estimate
+    ? `${escapeHtml(prettyProjectName(project.name))} <span class="est">${estimate}</span>`
+    : escapeHtml(prettyProjectName(project.name));
+  const label = [
+    `<span class="tag">${escapeHtml(project.name)}</span>`,
+    renderBranchTags(day.branches ?? []),
+  ]
+    .filter(Boolean)
+    .join(' ');
+  const headline = day.ai?.title
+    ? `<p class="headline">${escapeHtml(day.ai.title)}</p>`
+    : '';
 
   const summary = day.ai?.summary
     ? `<div class="summary-row">
@@ -109,8 +117,9 @@ function renderDay(day) {
         <article class="day">
           <header class="day-head">
             <div>
-              <p class="day-date">${dateLine}</p>
-              <h3>${title}</h3>
+              <p class="day-date">${label}</p>
+              <h3>${name}</h3>
+              ${headline}
             </div>
             <p class="day-meta">${day.commits.length} ${day.commits.length === 1 ? 'change' : 'changes'} &middot; ${stats.files} ${stats.files === 1 ? 'file' : 'files'}</p>
           </header>
@@ -119,21 +128,40 @@ function renderDay(day) {
         </article>`;
 }
 
-function renderProject(project) {
-  const dayCount = project.days.length;
+/** Newest day first; inside a day, the busiest project first. */
+function groupByDate(projects) {
+  const byDate = new Map();
+
+  for (const project of projects) {
+    for (const day of project.days) {
+      if (!byDate.has(day.date)) byDate.set(day.date, []);
+      byDate.get(day.date).push({ project, day });
+    }
+  }
+
+  return [...byDate.entries()]
+    .sort(([left], [right]) => right.localeCompare(left))
+    .map(([date, entries]) => ({
+      date,
+      entries: entries.sort(
+        (left, right) =>
+          right.day.commits.length - left.day.commits.length ||
+          left.project.name.localeCompare(right.project.name),
+      ),
+    }));
+}
+
+function renderDate(group) {
+  const changes = group.entries.reduce((total, { day }) => total + day.commits.length, 0);
+  const projectCount = group.entries.length;
 
   return `
-      <section class="project">
-        <header class="project-head">
-          <h2>${escapeHtml(prettyProjectName(project.name))}</h2>
-          <p class="project-meta">
-            <span class="tag">${escapeHtml(project.name)}</span>
-            <span>${project.commitCount} ${project.commitCount === 1 ? 'change' : 'changes'}</span>
-            <span>${dayCount} ${dayCount === 1 ? 'working day' : 'working days'}</span>
-            ${renderBranchTags(project.branches)}
-          </p>
+      <section class="date-group">
+        <header class="date-head">
+          <h2>${escapeHtml(formatDate(group.date))}</h2>
+          <p class="date-meta">${projectCount} ${projectCount === 1 ? 'project' : 'projects'} &middot; ${changes} ${changes === 1 ? 'change' : 'changes'}</p>
         </header>
-        ${project.days.map(renderDay).join('')}
+        ${group.entries.map(({ project, day }) => renderProjectDay(project, day)).join('')}
       </section>`;
 }
 
@@ -225,10 +253,17 @@ const STYLES = `
     .stat-value { font-size: 26px; font-weight: 650; letter-spacing: -0.02em; }
     .stat-label { font-size: 13px; color: var(--ink-soft); }
 
-    .project { margin-bottom: 40px; }
-    .project-head { margin-bottom: 14px; }
-    .project-head h2 { margin: 0 0 6px; font-size: 21px; letter-spacing: -0.01em; }
-    .project-meta { margin: 0; display: flex; flex-wrap: wrap; gap: 8px 14px; font-size: 13px; color: var(--ink-soft); }
+    .date-group { margin-bottom: 40px; }
+    .date-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 16px;
+      flex-wrap: wrap;
+      margin-bottom: 14px;
+    }
+    .date-head h2 { margin: 0; font-size: 21px; letter-spacing: -0.01em; }
+    .date-meta { margin: 0; font-size: 13px; color: var(--ink-soft); white-space: nowrap; }
     .tag {
       background: var(--accent-soft);
       color: var(--accent);
@@ -261,6 +296,7 @@ const STYLES = `
       white-space: nowrap;
     }
     .day-head h3 { margin: 0; font-size: 18px; letter-spacing: -0.01em; }
+    .headline { margin: 4px 0 0; font-weight: 600; }
     .day-meta { margin: 0; font-size: 13px; color: var(--ink-soft); white-space: nowrap; }
     .summary { margin: 14px 0 0; }
     .summary-row { display: flex; align-items: flex-start; gap: 12px; margin-top: 14px; }
@@ -314,7 +350,7 @@ const STYLES = `
     @media print {
       body { background: #fff; padding: 0; font-size: 12px; }
       .report-head, .stat, .day { border-color: #d5d9e0; break-inside: avoid; }
-      .project { break-inside: avoid-page; }
+      .date-head { break-after: avoid; }
       .copy { display: none; }
       .tech { display: none; }
       .footer { display: none; }
@@ -396,7 +432,7 @@ export function renderReport({ projects, totals, meta }) {
   );
 
   const body = projects.length
-    ? projects.map(renderProject).join('')
+    ? groupByDate(projects).map(renderDate).join('')
     : `<div class="empty"><p>No work was recorded for this period.</p></div>`;
 
   return `<!DOCTYPE html>

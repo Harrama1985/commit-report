@@ -1,9 +1,9 @@
-const API_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
+const API_BASE = 'https://api.openai.com/v1';
 
-export const DEFAULT_MODEL = 'gemini-3.6-flash';
+export const DEFAULT_MODEL = 'gpt-5.4-mini';
 
 /** Tried in order when the requested model is rejected as unknown. */
-const MODEL_FALLBACKS = ['gemini-flash-latest', 'gemini-2.5-flash'];
+const MODEL_FALLBACKS = ['gpt-5-mini', 'gpt-4.1-mini'];
 
 /** Roughly two printed lines at the report's text width. */
 const SUMMARY_LIMIT = 200;
@@ -13,25 +13,37 @@ const MIN_ESTIMATE_MINUTES = 30;
 const MAX_ESTIMATE_MINUTES = 2400;
 const ESTIMATE_STEP_MINUTES = 30;
 
-const RESPONSE_SCHEMA = {
-  type: 'OBJECT',
-  properties: {
-    title: { type: 'STRING', maxLength: '70' },
-    summary: { type: 'STRING', maxLength: String(SUMMARY_LIMIT) },
-    estimatedMinutes: { type: 'INTEGER' },
+/**
+ * Structured Outputs refuses length keywords, so the sizes promised in the
+ * prompt are enforced afterwards by the clamps below.
+ */
+const RESPONSE_FORMAT = {
+  type: 'json_schema',
+  json_schema: {
+    name: 'day_report',
+    strict: true,
+    schema: {
+      type: 'object',
+      properties: {
+        title: { type: 'string' },
+        summary: { type: 'string' },
+        estimatedMinutes: { type: 'integer' },
+      },
+      required: ['title', 'summary', 'estimatedMinutes'],
+      additionalProperties: false,
+    },
   },
-  required: ['title', 'summary', 'estimatedMinutes'],
 };
 
 const SYSTEM_PROMPT = `You are writing a daily work report that a software developer sends to a non-technical client.
 
-You receive the raw git commits of one project for one day. Rewrite them as business value delivered.
+You receive the commits of one project for one day, including the lines that changed. Use those lines only to understand exactly what happened and how long the work took. Do not describe them to the client. The title and the summary are for an ordinary client.
 
 Rules:
-- Write in clear, simple English that someone with no technical background understands.
+- Write in clear, simple English that an ordinary client understands on the first read.
 - Never mention git, commits, branches, merges, refactoring, code, components, hooks, APIs, endpoints, variables, files or library names.
-- Talk about the product and the user experience: pages, screens, forms, buttons, texts, images, speed, errors that were fixed, new possibilities.
-- Never invent work that is not in the commits. If a commit is unclear, describe it in a broad but honest way.
+- Talk about what a person can now do, what was fixed, and what changed for them: pages, screens, forms, buttons, texts, images, speed, errors, new possibilities.
+- Never invent work that is not in the commits. If a change is unclear, describe it in a broad but honest way.
 - Group related commits together instead of translating them one by one. Several small commits about the same thing become one sentence.
 - Stay factual and calm. No marketing hype, no exclamation marks, no emojis.
 - The date is already printed above your text, so never open with "Today" or name the day.
@@ -44,9 +56,20 @@ Return JSON with:
 
 The summary is the only text the client reads, so it must be complete and dense. Cover every distinct piece of work of the day, folding the smaller ones into a shared clause, and drop nothing that the client would care about. Write it as plain running prose: never use bullet points, dashes, numbering, line breaks or any other kind of list.
 
-Base the estimate on the work itself: what the changes do, how many files they touch, how much they add or remove. The times on the commits tell you nothing, they are when the work was saved and not how long it took. Assume a developer working with an AI assistant, so the pace is fast, and always include the testing, the review and the deployment in the number. Never cap the number at a working day: one batch of commits often carries work spread over several days.`;
+Base the estimate on the work itself: what the changes do, how many files they touch, how much they add or remove. The times on the commits tell you nothing, they are when the work was saved and not how long it took. Do not assume a fast pace from an assistant doing the work alone. Some of the work is done by hand. When an assistant drafts a change, the developer still reads that code and reworks anything that is not right, so include that reading and correction. Always include the testing, the review and the deployment in the number. Never cap the number at a working day: one batch of commits often carries work spread over several days.`;
+
+/** A whole day of diffs stays bounded, so one busy project cannot flood the request. */
+const DAY_PATCH_LIMIT = 12000;
+
+function clipPatch(patch, limit) {
+  if (!patch || limit <= 0) return '';
+  if (patch.length <= limit) return patch;
+  return `${patch.slice(0, limit).trimEnd()}\n…`;
+}
 
 function buildUserPrompt({ projectName, date, commits }) {
+  let remaining = DAY_PATCH_LIMIT;
+
   const lines = commits.map((commit, index) => {
     const parts = [`Commit ${index + 1}: ${commit.subject}`];
     if (commit.body) parts.push(`Details: ${commit.body.replace(/\s+/g, ' ').slice(0, 700)}`);
@@ -54,6 +77,14 @@ function buildUserPrompt({ projectName, date, commits }) {
       const shown = commit.files.slice(0, 12).join(', ');
       const rest = commit.files.length > 12 ? ` (+${commit.files.length - 12} more)` : '';
       parts.push(`Touched: ${shown}${rest}`);
+    }
+    if (commit.insertions || commit.deletions) {
+      parts.push(`Size: +${commit.insertions} -${commit.deletions}`);
+    }
+    const patch = clipPatch(commit.patch, remaining);
+    if (patch) {
+      parts.push(`Changed lines:\n${patch}`);
+      remaining -= patch.length;
     }
     return parts.join('\n');
   });
@@ -153,15 +184,23 @@ class ModelNotFoundError extends Error {}
 /** A failure that retrying cannot fix, such as a rejected key or a bad request. */
 class PermanentError extends Error {}
 
+/**
+ * A 400 naming the model is how OpenAI answers an unknown model on some
+ * routes, so it is read as "not found" rather than as a broken request.
+ */
+function isUnknownModel(status, detail) {
+  if (status === 404) return true;
+  return status === 400 && /model/i.test(detail) && /not (exist|found|supported)/i.test(detail);
+}
+
 async function callModel({ apiKey, model, prompt, timeout, baseUrl }) {
   const body = {
-    systemInstruction: { parts: [{ text: SYSTEM_PROMPT }] },
-    contents: [{ role: 'user', parts: [{ text: prompt }] }],
-    generationConfig: {
-      temperature: 0.3,
-      responseMimeType: 'application/json',
-      responseSchema: RESPONSE_SCHEMA,
-    },
+    model,
+    messages: [
+      { role: 'system', content: SYSTEM_PROMPT },
+      { role: 'user', content: prompt },
+    ],
+    response_format: RESPONSE_FORMAT,
   };
 
   let lastError;
@@ -171,55 +210,60 @@ async function callModel({ apiKey, model, prompt, timeout, baseUrl }) {
     const timer = setTimeout(() => controller.abort(), timeout);
 
     try {
-      const response = await fetch(`${baseUrl}/${model}:generateContent`, {
+      const response = await fetch(`${baseUrl}/chat/completions`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json', 'x-goog-api-key': apiKey },
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${apiKey}`,
+        },
         body: JSON.stringify(body),
         signal: controller.signal,
       });
 
-      if (response.status === 404) {
-        throw new ModelNotFoundError(`Model "${model}" is not available for this API key`);
-      }
-
       if (response.status === 401 || response.status === 403) {
         const detail = await response.text();
         throw new PermanentError(
-          `Google AI rejected the API key (${response.status}): ${detail.slice(0, 200)}`,
+          `OpenAI rejected the API key (${response.status}): ${detail.slice(0, 200)}`,
         );
       }
 
       if (response.status === 429 || response.status >= 500) {
-        lastError = new Error(`Google AI is unavailable (${response.status})`);
+        lastError = new Error(`OpenAI is unavailable (${response.status})`);
         await sleep(1500 * 2 ** attempt);
         continue;
       }
 
       if (!response.ok) {
         const detail = await response.text();
+        if (isUnknownModel(response.status, detail)) {
+          throw new ModelNotFoundError(`Model "${model}" is not available for this API key`);
+        }
         throw new PermanentError(
-          `Google AI request failed (${response.status}): ${detail.slice(0, 300)}`,
+          `OpenAI request failed (${response.status}): ${detail.slice(0, 300)}`,
         );
       }
 
       const payload = await response.json();
-      const text = payload?.candidates?.[0]?.content?.parts
-        ?.map((part) => part.text ?? '')
-        .join('')
-        .trim();
+      const choice = payload?.choices?.[0];
+
+      if (choice?.message?.refusal) {
+        throw new PermanentError(`OpenAI refused the request: ${choice.message.refusal}`);
+      }
+
+      const text = (choice?.message?.content ?? '').trim();
 
       if (!text) {
-        const reason = payload?.candidates?.[0]?.finishReason ?? 'unknown reason';
-        throw new Error(`Google AI returned an empty answer (${reason})`);
+        const reason = choice?.finish_reason ?? 'unknown reason';
+        throw new Error(`OpenAI returned an empty answer (${reason})`);
       }
 
       const parsed = parseJsonLoosely(text);
-      if (!parsed) throw new Error('Google AI returned an answer that is not valid JSON');
+      if (!parsed) throw new Error('OpenAI returned an answer that is not valid JSON');
       return parsed;
     } catch (error) {
       if (error instanceof ModelNotFoundError || error instanceof PermanentError) throw error;
       if (error.name === 'AbortError') {
-        lastError = new Error(`Google AI timed out after ${Math.round(timeout / 1000)}s`);
+        lastError = new Error(`OpenAI timed out after ${Math.round(timeout / 1000)}s`);
       } else {
         lastError = error;
       }
@@ -230,7 +274,7 @@ async function callModel({ apiKey, model, prompt, timeout, baseUrl }) {
     }
   }
 
-  throw lastError ?? new Error('Google AI request failed');
+  throw lastError ?? new Error('OpenAI request failed');
 }
 
 /** Runs `worker` over `items`, at most `limit` at a time, preserving order. */

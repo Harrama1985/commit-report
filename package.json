@@ -1,7 +1,7 @@
 {
   "name": "commit-reports",
-  "version": "1.0.0",
-  "description": "Scan local git projects, group commits by project and date, and turn them into a client-friendly HTML report using Google AI Studio (Gemini).",
+  "version": "1.0.1",
+  "description": "Scan local git projects, group commits by date and then by project, and turn them into a client-friendly HTML report using OpenAI (GPT).",
   "type": "module",
   "bin": {
     "commit-report": "src/cli.js"
@@ -27,12 +27,21 @@
     "commits",
     "report",
     "changelog",
-    "gemini",
+    "openai",
+    "gpt",
     "ai",
     "client-report",
     "html"
   ],
   "author": "Ghizlane Harrama <ghizlane.tsdi@gmail.com>",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Harrama1985/commit-report.git"
+  },
+  "homepage": "https://github.com/Harrama1985/commit-report#readme",
+  "bugs": {
+    "url": "https://github.com/Harrama1985/commit-report/issues"
+  },
   "dependencies": {}
 }

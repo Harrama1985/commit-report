@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
+import { promisify } from 'node:util';
 
-import { collectBranches, groupByProjectAndDate, summarizeTotals } from '../src/git.js';
+import { collectBranches, getCommits, groupByProjectAndDate, summarizeTotals } from '../src/git.js';
 
 const commit = (overrides) => ({
   hash: 'a'.repeat(40),
@@ -126,4 +131,39 @@ test('summarizeTotals counts unique files per project and unique days', () => {
     files: 3,
     days: 2,
   });
+});
+
+test('getCommits keeps the changed lines and drops lockfiles', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'commit-reports-'));
+  const run = promisify(execFile);
+  const git = (args) =>
+    run('git', args, {
+      cwd: dir,
+      env: {
+        ...process.env,
+        GIT_AUTHOR_NAME: 'Dev',
+        GIT_AUTHOR_EMAIL: 'dev@example.com',
+        GIT_COMMITTER_NAME: 'Dev',
+        GIT_COMMITTER_EMAIL: 'dev@example.com',
+      },
+    });
+
+  try {
+    await git(['init']);
+    await writeFile(join(dir, 'note.txt'), 'hello client\n');
+    await writeFile(join(dir, 'package-lock.json'), '{"lock":true}\n');
+    await git(['add', '.']);
+    await git(['commit', '-m', 'add a note']);
+
+    const commits = await getCommits(
+      { path: dir, name: 'tmp' },
+      { from: '2020-01-01', to: '2030-01-01', author: 'dev@example.com' },
+    );
+
+    assert.equal(commits.length, 1);
+    assert.match(commits[0].patch, /hello client/);
+    assert.ok(!commits[0].patch.includes('package-lock'), 'a lockfile diff is not useful work');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });

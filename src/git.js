@@ -9,6 +9,12 @@ const LOG_FORMAT = `${RECORD_SEP}%H${FIELD_SEP}%aI${FIELD_SEP}%an${FIELD_SEP}%ae
 
 const MAX_BUFFER = 32 * 1024 * 1024;
 
+/** Enough of a diff to see the change, without sending a whole generated file. */
+const PATCH_LIMIT = 2500;
+
+const OMITTED_PATH =
+  /(?:^|\/)(?:package-lock\.json|yarn\.lock|pnpm-lock\.yaml|composer\.lock|Gemfile\.lock)$/i;
+
 async function git(cwd, args) {
   const { stdout } = await run('git', args, { cwd, maxBuffer: MAX_BUFFER });
   return stdout;
@@ -40,6 +46,34 @@ function parseNumstat(blob) {
   }
 
   return { files, insertions, deletions };
+}
+
+/** `--patch` is appended after the numstat block. */
+function splitStatAndPatch(blob) {
+  const at = blob.search(/\n(?=diff --git |Binary files )/);
+  if (at === -1) return { stat: blob, patch: '' };
+  return { stat: blob.slice(0, at), patch: blob.slice(at + 1) };
+}
+
+/**
+ * Keeps the source diff and drops lockfiles and binaries. A long change is cut
+ * so one file cannot crowd out the rest of the day.
+ */
+function selectChangedLines(patch) {
+  const chunks = patch
+    .split(/^(?=diff --git |Binary files )/m)
+    .map((chunk) => chunk.trim())
+    .filter(Boolean);
+
+  const kept = chunks.filter((chunk) => {
+    if (chunk.startsWith('Binary files ')) return false;
+    const file = chunk.match(/^diff --git a\/(.+) b\//)?.[1] ?? '';
+    return !OMITTED_PATH.test(file);
+  });
+
+  const text = kept.join('\n\n');
+  if (text.length <= PATCH_LIMIT) return text;
+  return `${text.slice(0, PATCH_LIMIT).trimEnd()}\n…`;
 }
 
 /**
@@ -86,7 +120,8 @@ function parseLog(stdout) {
     .map((chunk) => {
       const [hash, isoDate, authorName, authorEmail, ref, subject, body, statBlob = ''] =
         chunk.split(FIELD_SEP);
-      const { files, insertions, deletions } = parseNumstat(statBlob);
+      const { stat, patch } = splitStatAndPatch(statBlob);
+      const { files, insertions, deletions } = parseNumstat(stat);
       const branch = branchName(ref);
 
       return {
@@ -103,6 +138,7 @@ function parseLog(stdout) {
         files,
         insertions,
         deletions,
+        patch: selectChangedLines(patch),
       };
     });
 
@@ -123,6 +159,7 @@ export async function getCommits(repo, { from, to, author, includeMerges = false
     '--date=iso-strict',
     `--pretty=format:${LOG_FORMAT}`,
     '--numstat',
+    '--patch',
   ];
 
   if (!includeMerges) args.push('--no-merges');
